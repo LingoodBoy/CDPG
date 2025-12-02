@@ -4,7 +4,7 @@
 
 ```
 CDPG/
-├── Pretrain/          # Traffic prediction model pretraining and few-shot fine-tuning
+├── Pretrain/          # Mobile traffic prediction model pretraining and few-shot fine-tuning
 ├── parameter_generate/               # Diffusion-based Neural Parameter Generation
 ├── spatial/               # LLM-Enhanced Spatial Context Extraction
 ├── temporal/               # Pattern-Guided Temporal Context Extraction
@@ -72,3 +72,4 @@ python main_parallel.py --mode finetuning --test_data nc --epochs 50 --target_da
 ## License
 
 MIT License
+
