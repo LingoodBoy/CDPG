@@ -1,0 +1,70 @@
+data:
+  image_dir: "/Users/xiaolinzi/mac-syncthing/project/my_seq/data/satellite_images"
+  text_dir: "/Users/xiaolinzi/mac-syncthing/project/my_seq/data/llm_texts"
+  cities: ["sh", "nj", "nc"]
+
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+  cross_city_test: false
+
+model:
+
+  local_files_only: true 
+
+  image_encoder:
+    backbone: "vit_base_patch16_224" 
+    pretrained: false 
+    image_size: 256
+    embedding_dim: 64
+    dropout: 0.1
+
+  text_encoder:
+    backbone: "bert-base-uncased"  
+    max_length: 128 
+    embedding_dim: 64
+    dropout: 0.1
+
+  temperature: 0.07 
+
+training:
+
+  phase1:
+    epochs: 5
+    batch_size: 128
+    learning_rate: 0.001
+    freeze_encoders: true
+
+  phase2:
+    epochs: 15
+    batch_size: 128
+    learning_rate_backbone: 0.0001
+    learning_rate_projection: 0.001
+
+    image_unfreeze_blocks: 4
+
+    text_unfreeze_layers: 3
+
+  phase3:
+    enabled: false 
+    epochs: 10
+    batch_size: 128
+    learning_rate_backbone: 0.00001
+    learning_rate_projection: 0.0001
+
+  optimizer: "adamw"
+  weight_decay: 0.01
+  warmup_steps: 500
+
+  num_workers: 4
+  seed: 42
+  gradient_clip: 1.0
+
+logging:
+  log_dir: "logs"
+  checkpoint_dir: "checkpoints"
+  save_interval: 5 
+  log_interval: 10 
+
+device: "cuda"  # cuda or cpu or mps

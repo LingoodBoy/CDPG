@@ -1,0 +1,55 @@
+data:
+  image_dir: "/root/lanyun-fs/project/my_seq/data/satellite_images"
+  text_dir: "/root/lanyun-fs/project/my_seq/data/llm_texts"
+  cities: ["sh", "nj", "nc"]
+
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+  cross_city_test: false
+
+model:
+
+  local_files_only: false 
+
+  # Image Encoder
+  image_encoder:
+    backbone: "vit_base_patch16_224"
+    pretrained: true 
+    image_size: 256
+    embedding_dim: 64
+    dropout: 0.1
+
+  # Text Encoder
+  text_encoder:
+    backbone: "bert-base-uncased"
+    max_length: 128
+    embedding_dim: 64
+    dropout: 0.1
+
+  temperature: 0.07
+
+training:
+
+  epochs: 30  
+  batch_size: 128 
+  learning_rate: 0.0001  
+
+  optimizer: "adamw"
+  weight_decay: 0.01
+  warmup_epochs: 2 
+
+  num_workers: 8 
+  mixed_precision: true
+
+  seed: 42
+  gradient_clip: 1.0
+
+logging:
+  log_dir: "logs"
+  checkpoint_dir: "checkpoints"
+  save_interval: 5  
+  log_interval: 50 
+
+device: "cuda"

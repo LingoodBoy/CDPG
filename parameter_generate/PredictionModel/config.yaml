@@ -1,0 +1,50 @@
+data:
+  data_keys: ['sh','nc','nj']
+  sh:
+    dataset_path: ../data/handled/sh/sh_4505_1488.npy
+    adjacency_matrix_path: ../data/handled/sh/sh_spatial_24.npy
+    time_step: 1488
+    node_num: 4505
+    speed_mean: 50.0
+    speed_std: 20.0
+    node_feature_dim: 1
+  nc:
+    dataset_path: ../data/handled/nc/nc_7702_336.npy
+    adjacency_matrix_path: ../data/handled/nc/nc_spatial_graph.npy
+    time_step: 336
+    node_num: 7702
+    speed_mean: 50.0
+    speed_std: 20.0
+    node_feature_dim: 1
+  nj:
+    dataset_path: ../data/handled/nj/nj_8000_2784.npy
+    adjacency_matrix_path: ../data/handled/nj/nj_spatial_graph.npy
+    time_step: 2784
+    node_num: 8000
+    speed_mean: 50.0
+    speed_std: 20.0
+    node_feature_dim: 1
+
+  
+task:
+  his_num: 12
+  pred_num: 1
+  batch_size: 64
+  test_batch_size: 32
+  task_num: 2
+
+model:
+  node_feature_dim: 1
+  edge_feature_dim: 4
+  message_dim: 1
+  hidden_dim: 16
+  output_dim: 1
+  meta_dim: 16
+  update_lr: 0.0005 
+  meta_lr: 0.0002 # 0.0001
+  loss_lambda: 1.5
+  update_step: 5
+  update_step_test: 10
+  tp: True
+  sp: True
+  

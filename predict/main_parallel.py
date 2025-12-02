@@ -1,0 +1,459 @@
+import argparse 
+import sys     
+import time   
+import os      
+import random
+
+import torch                         
+import torch.nn as nn            
+import torch.nn.functional as F   
+import torch.optim as optim    
+from torch.utils.tensorboard import SummaryWriter
+import yaml 
+
+from datasets import *    
+from NetSet import *   
+from torch.utils.data.sampler import *  
+from torch_geometric.loader import DataLoader  
+from tqdm import tqdm         
+from utils.logger_utils import training_session, setup_logger   
+from utils.train_utils import set_random_seed
+
+from enhanced_logging import (
+    enhance_pretrain_logging, log_node_training_start,
+    log_node_training_complete, log_epoch_progress,
+    log_final_results, create_enhanced_progress_bar
+)
+
+def getNewIndex(nodeindex, addr):
+    return 0
+
+def train_epoch(train_dataloader):
+    train_losses = []
+    for step, (data, A_wave) in enumerate(train_dataloader):
+        model.train()
+        optimizer.zero_grad()
+
+        A_wave = A_wave.to(device=args.device, dtype=torch.float32, non_blocking=True)
+        data = data.to(device=args.device, non_blocking=True)
+
+        out, meta_graph = model(data, A_wave)
+
+        loss_predict = loss_criterion(out, data.y) 
+        loss = loss_predict
+
+        loss.backward() 
+        optimizer.step()
+        train_losses.append(loss.detach().cpu().numpy())
+
+    return sum(train_losses)/len(train_losses)
+
+def test_epoch(test_dataloader):
+    with torch.no_grad():
+        model.eval()
+
+        for step, (data, A_wave) in enumerate(test_dataloader):
+
+            A_wave = A_wave.to(device=args.device, dtype=torch.float32, non_blocking=True)
+            data = data.to(device=args.device, non_blocking=True)
+
+            out, _ = model(data, A_wave)
+
+            if step == 0:
+
+                outputs = out
+                y_label = data.y
+            else:
+
+                outputs = torch.cat((outputs, out))
+                y_label = torch.cat((y_label, data.y))
+
+        outputs = outputs.permute(0, 2, 1).detach().cpu().numpy()
+        y_label = y_label.permute(0, 2, 1).detach().cpu().numpy()
+
+    return outputs, y_label
+
+
+parser = argparse.ArgumentParser(description='training script')
+
+parser.add_argument('--config_filename', default='config.yaml', type=str,
+                        help='YAML')
+
+parser.add_argument('--test_dataset', default='metr-la', type=str,
+                        help='target dataset')
+
+parser.add_argument('--start_node', default=0, type=int,
+                        help='start index')
+parser.add_argument('--end_node', default=None, type=int,
+                        help='end index')
+
+parser.add_argument('--meta_dim', default=32, type=int,
+                        help='')
+parser.add_argument('--target_days', default=15, type=int,
+                        help='target days')
+parser.add_argument('--model', default='v_Trans', type=str,
+                        help='target model')
+parser.add_argument('--loss_lambda', default=1.5, type=float,
+                        help='loss lambda')
+parser.add_argument('--lr', default=None, type=float,
+                        help='learning rate')
+parser.add_argument('--num_workers', default=2, type=int,
+                        help='Num_workers of DataLoader')
+
+parser.add_argument('--memo', default='revise', type=str,
+                        help='memo')
+parser.add_argument('--batch_size', default=64, type=int,
+                        help='traininig batch_size')
+parser.add_argument('--test_batch_size', default=49, type=int,
+                        help='test batch size')
+parser.add_argument('--epochs', default=30, type=int,
+                        help='training epoch')
+
+parser.add_argument('--mode', default='pretrain', type=str, choices=['pretrain', 'finetuning'],
+                        help='training mode')
+parser.add_argument('--nodeindex', default=0, type=int,
+                        help='node index')
+parser.add_argument('--message_dim', default=1, type=int,
+                        help='message_dim')
+
+parser.add_argument('--iftest', default=True, type=bool,
+                        help='istest')
+parser.add_argument("--ifchosenode", action="store_true",
+                        help='ifchosenode')
+
+parser.add_argument('--logindex', default='0', type=str,
+                        help='logindex')
+parser.add_argument('--ifspatial', default=1, type=int,
+                        help='ifspatial 1 is true')
+parser.add_argument('--ifnewname', default=0, type=int,
+                        help='ifnewname')
+parser.add_argument('--aftername', default='', type=str,
+                        help='File name suffix')
+
+parser.add_argument('--datanum', default=0.7, type=float,
+                        help='Sampling ratio')
+
+parser.add_argument('--params_file', default='', type=str,
+                        help='The path of the parameter file generated by diffusion')
+
+parser.add_argument('--device', default='cuda', choices=['auto','cpu','cuda'],
+                        help='device')
+
+args = parser.parse_args()
+
+print(time.strftime('%Y-%m-%d %H:%M:%S'), "meta_dim = ", args.meta_dim,"target_days = ", args.target_days)
+
+if __name__ == '__main__':
+    set_random_seed(seed=42)
+
+    if args.start_node < 0:
+        args.start_node = 0
+        print(f"start_node 0")
+
+    process_id = f"{args.start_node}-{args.end_node if args.end_node else 'end'}"
+
+    original_aftername = args.aftername
+    args.aftername = f"{original_aftername}" if original_aftername else "parallel"
+
+    logger, filename = setup_logger(args.mode, args.test_dataset,
+                                    args.logindex, args.model, args.aftername,
+                                    node_range=process_id)
+    current_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
+
+    ifWarp = ""
+    if os.path.getsize(filename) != 0:
+        ifWarp = "\n\n"
+
+    logger.info(ifWarp + str(current_time) + ": start parallel training")
+    logger.info(f"training node range: {args.start_node} to {args.end_node if args.end_node else 'last'}")
+
+    enhance_pretrain_logging(logger, vars(args))
+    args.device=get_device()
+
+    with open(args.config_filename) as f:
+        config = yaml.full_load(f)
+
+    data_args, task_args, model_args = config['data'], config['task'], config['model']
+
+    model_args['meta_dim'] = args.meta_dim
+    model_args['loss_lambda'] = args.loss_lambda
+    model_args['message_dim'] = args.message_dim
+    if args.lr is not None:
+        model_args['meta_lr'] = args.lr
+    task_args['batch_size'] = args.batch_size
+    task_args['test_batch_size'] = args.test_batch_size
+
+    logger.info("batchsize: "+str(task_args['batch_size']))
+    logger.info("test_batch_size: "+str(task_args['test_batch_size']))
+    logger.info("lr: "+str(model_args['meta_lr']))
+
+    torch.backends.cudnn.benchmark = True 
+    torch.backends.cudnn.deterministic = False
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache() 
+
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:2048,roundup_power2_divisions:16'
+
+        dummy = torch.randn(1, device=args.device)
+        del dummy
+
+    loss_criterion = nn.MSELoss()
+
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    tb_log_dir = f"runs/{args.mode}_{args.model}_{args.test_dataset}_{args.aftername}_{process_id}_{timestamp}"
+    writer = SummaryWriter(tb_log_dir)
+    logger.info(f"TensorBoard is saving to: {tb_log_dir}")
+
+    global_timestamp = timestamp
+
+    source_training_losses, target_training_losses = [], []
+    best_result = ''
+    min_MAE = 10000000 
+
+    if args.mode == 'pretrain':
+
+        node_num = 0 
+        epochs = 0   
+
+        if args.test_dataset in ['sh', 'nj', 'nc']:  
+            node_num = data_args[args.test_dataset]['node_num']
+            epochs = args.epochs
+
+        if args.end_node is None:
+            args.end_node = node_num
+
+        args.end_node = min(args.end_node, node_num)
+
+        if args.start_node >= args.end_node:
+            logger.error(f"error：start_node ({args.start_node}) >= end_node ({args.end_node})")
+            sys.exit(1)
+
+        actual_node_count = args.end_node - args.start_node
+        step = 0 
+
+        logger.info(f'dataset {args.test_dataset} node sum: {node_num}')
+        logger.info(f'training range: {args.start_node} - {args.end_node-1} (about{actual_node_count}nodes)')
+
+        for node_index in range(args.start_node, args.end_node):
+
+            model = StgnnSet(data_args, task_args, model_args,
+                             model=args.model).to(device=args.device)
+
+            logger.info("train node_index: {}".format(node_index))
+
+            train_dataset = traffic_dataset2(data_args, task_args, node_index,
+                                             "singlePretrain", args.ifchosenode,
+                                             test_data=args.test_dataset,
+                                           target_days=args.target_days,
+                                             ifspatial=args.ifspatial, datanum=args.datanum)
+
+            train_meanstd = [train_dataset.mean, train_dataset.std]
+
+            dataloader_kwargs = {
+                'batch_size': task_args['batch_size'],
+                'shuffle': True,
+                'num_workers': args.num_workers,
+                'pin_memory': True,
+                'drop_last': True
+            }
+            if args.num_workers > 0:
+                dataloader_kwargs['persistent_workers'] = True
+                dataloader_kwargs['prefetch_factor'] = 2
+            train_dataloader = DataLoader(train_dataset, **dataloader_kwargs)
+
+            if hasattr(train_dataset, 'computed_norm_params'):
+                test_dataset = traffic_dataset2(data_args, task_args, node_index, "test",
+                                              args.ifchosenode, test_data=args.test_dataset,
+                                              ifspatial=args.ifspatial,
+                                              norm_params=train_dataset.computed_norm_params)
+            else:
+                test_dataset = traffic_dataset2(data_args, task_args, node_index, "test",
+                                              args.ifchosenode, test_data=args.test_dataset,
+                                              ifspatial=args.ifspatial)
+
+            test_meanstd = [test_dataset.mean, test_dataset.std]
+
+            test_dataloader_kwargs = {
+                'batch_size': task_args['test_batch_size'],
+                'shuffle': False,
+                'num_workers': args.num_workers,
+                'pin_memory': True,
+                'drop_last': True
+            }
+            if args.num_workers > 0:
+                test_dataloader_kwargs['persistent_workers'] = True
+                test_dataloader_kwargs['prefetch_factor'] = 2
+            test_dataloader = DataLoader(test_dataset, **test_dataloader_kwargs)
+
+            if args.ifchosenode == True:
+                AAddr = data_args[args.test_dataset]['adjacency_matrix_path']
+            else:
+                AAddr = data_args[args.test_dataset].get('iadjacency_matrix_path',
+                                                       data_args[args.test_dataset]['adjacency_matrix_path'])
+
+            newindex = getNewIndex(node_index, AAddr)
+
+            outputs, y_label = model.node_taskTrain(args.model, newindex, node_index,
+                                                   train_dataloader, test_dataloader,
+                                                   train_dataset, test_dataset,
+                                                   epochs, logger, args.test_dataset,
+                                                   args.ifnewname, args.aftername, writer, global_timestamp,
+                                                   node_range=process_id) 
+
+            if step == 0:
+
+                out = outputs
+                truth = y_label
+                step = 1
+            else:
+
+                out = np.concatenate((out, outputs), axis=2)
+                truth = np.concatenate((truth, y_label), axis=2)
+        logger.info("######################################")
+        logger.info(f"###########  Current process result (node {args.start_node}-{args.end_node-1})  ###########")
+
+        result = metric_func(pred=out, y=truth, times=task_args['pred_num'])
+
+        final_mae = result['MAE']
+        final_rmse = result['RMSE']
+        for i in range(len(final_mae)):
+            writer.add_scalar(f'Partial_Final/MAE_step_{i+1}', final_mae[i], 0)
+            writer.add_scalar(f'Partial_Final/RMSE_step_{i+1}', final_rmse[i], 0)
+
+        result_print(result, logger, info_name=f'Evaluate_Nodes_{args.start_node}_{args.end_node-1}')
+
+        writer.close()
+        logger.info("TensorBoard is closed")
+        logger.info("Training completed！")
+
+    elif args.mode == 'finetuning':
+        node_num = 0
+        epochs = 0 
+        if args.test_dataset == 'sh':
+            node_num = data_args[args.test_dataset]['node_num']
+            epochs = args.epochs
+            if args.params_file:
+                params_path = args.params_file
+                logger.info(f'params_path: {params_path}')
+            params = np.load(params_path)
+            logger.info(f'params shape: {params.shape}')
+        elif args.test_dataset == 'nc':
+            node_num = data_args[args.test_dataset]['node_num']
+            epochs = args.epochs
+            if args.params_file:
+                params = np.load(args.params_file)
+            else:
+                params_path = '../GPD/Output/sampleRes_best_nc.npy'
+                params = np.load(params_path)
+
+        elif args.test_dataset == 'nj':
+            node_num = data_args[args.test_dataset]['node_num']  
+            epochs = args.epochs
+            if args.params_file:
+                params = np.load(args.params_file)
+            else:
+                params_path = '../GPD/Output/sampleRes_best_nj.npy'
+                params = np.load(params_path)
+
+        if args.end_node is None:
+            args.end_node = node_num
+
+        args.end_node = min(args.end_node, node_num)
+
+        if args.start_node >= args.end_node:
+            logger.error(f"error：start_node ({args.start_node}) >= end_node ({args.end_node})")
+            sys.exit(1)
+
+        actual_node_count = args.end_node - args.start_node
+        step = 0  
+
+        logger.info(f'dataset {args.test_dataset} total node num: {node_num}')
+        logger.info(f'finetuning node range: {args.start_node} - {args.end_node-1} ({actual_node_count} nodes)')
+
+        params = params.reshape((params.shape[0], -1))
+
+        for node_index in tqdm(range(args.start_node, args.end_node),
+                              desc=f"finetuning {args.start_node}-{args.end_node-1}"):
+
+            model = StgnnSet(data_args, task_args, model_args, model=args.model).to(device=args.device)
+
+            logger.info("train node_index: {}".format(node_index))
+
+            train_dataset = traffic_dataset2(data_args, task_args, node_index, "target",
+                                           args.ifchosenode, test_data=args.test_dataset,
+                                           target_days=args.target_days, ifspatial=args.ifspatial,
+                                           datanum=args.datanum)
+
+            train_meanstd = [train_dataset.mean, train_dataset.std]
+
+            dataloader_kwargs = {
+                'batch_size': task_args['batch_size'],
+                'shuffle': True,
+                'num_workers': args.num_workers,
+                'pin_memory': True,
+                'drop_last': True
+            }
+            if args.num_workers > 0:
+                dataloader_kwargs['persistent_workers'] = True
+                dataloader_kwargs['prefetch_factor'] = 2
+            train_dataloader = DataLoader(train_dataset, **dataloader_kwargs)
+
+            if hasattr(train_dataset, 'computed_norm_params'):
+                test_dataset = traffic_dataset2(data_args, task_args, node_index, "test",
+                                              args.ifchosenode, test_data=args.test_dataset,
+                                              ifspatial=args.ifspatial,
+                                              norm_params=train_dataset.computed_norm_params)
+            else:
+                test_dataset = traffic_dataset2(data_args, task_args, node_index, "test",
+                                              args.ifchosenode, test_data=args.test_dataset,
+                                              ifspatial=args.ifspatial)
+
+            test_meanstd = [test_dataset.mean, test_dataset.std]
+
+            test_dataloader_kwargs = {
+                'batch_size': task_args['test_batch_size'],
+                'shuffle': False,
+                'num_workers': args.num_workers,
+                'pin_memory': True,
+                'drop_last': True
+            }
+            if args.num_workers > 0:
+                test_dataloader_kwargs['persistent_workers'] = True
+                test_dataloader_kwargs['prefetch_factor'] = 2
+            test_dataloader = DataLoader(test_dataset, **test_dataloader_kwargs)
+            if args.ifchosenode == True:
+                AAddr = data_args[args.test_dataset]['adjacency_matrix_path']
+            else:
+                AAddr = data_args[args.test_dataset].get('iadjacency_matrix_path',
+                                                       data_args[args.test_dataset]['adjacency_matrix_path'])
+
+            newindex = getNewIndex(node_index, AAddr)
+
+            param = params[node_index]
+
+            outputs, y_label = model.node_taskTrain2(param, args.model, newindex,
+                                                    node_index,
+                                                    train_dataloader, test_dataloader,
+                                                    train_dataset, test_dataset,
+                                                    epochs, logger, args.test_dataset,
+                                                    args.ifnewname, args.aftername,
+                                                    node_range=process_id) 
+
+            if step == 0:
+                out = outputs
+                truth = y_label
+                step = 1
+            else:
+                out = np.concatenate((out, outputs), axis=2)
+                truth = np.concatenate((truth, y_label), axis=2)
+
+        logger.info("######################################")
+        logger.info(f"###########  The fine-tuning result of the current process (node {args.start_node}-{args.end_node-1})  ###########")
+
+        result = metric_func(pred=out, y=truth, times=task_args['pred_num'])
+
+        result_print(result, logger, info_name=f'Finetune_Evaluate_Nodes_{args.start_node}_{args.end_node-1}')
+
+        logger.info("fine-tuning completed！")
